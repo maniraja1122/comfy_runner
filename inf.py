@@ -143,7 +143,7 @@ class ComfyRunner:
     def filter_missing_node(self, workflow):
         mappings = self.comfy_api.get_node_mapping_list()
         custom_node_list = self.comfy_api.get_all_custom_node_list()
-        data = custom_node_list["custom_nodes"]
+        data = custom_node_list.get("custom_nodes", [])
 
         # Build regex->url map
         regex_to_url = [
@@ -345,7 +345,7 @@ class ComfyRunner:
         nodes_to_install = []
         if len(extra_node_url_dict.keys()):
             custom_node_list = self.comfy_api.get_all_custom_node_list()
-            custom_node_list = custom_node_list["custom_nodes"]
+            custom_node_list = custom_node_list.get("custom_nodes",[])
             url_node_map = {}
             for node in custom_node_list:
                 if node["reference"] not in url_node_map:
@@ -404,6 +404,59 @@ class ComfyRunner:
 
         return {
             "data": {"nodes_installed": nodes_installed},
+            "message": "",
+            "status": True,
+        }
+    
+    def download_manual_custom_nodes(self, extra_node_urls, client_id=None) -> dict:
+        nodes_installed = False
+        installed_nodes = []  # List to keep track of each custom node that was (re)installed
+        result = None
+
+        # Force installation for every custom node in extra_node_urls
+        for node in extra_node_urls:
+            print(f"Installing {node['title']} using CLI")
+            if self.gen_status_tracker.is_generation_cancelled(client_id):
+                break
+            try:
+
+                # Use subprocess to run the comfy CLI install command
+                install_cmd = [
+                    "comfy", "--no-enable-telemetry", "--skip-prompt", "--workspace", COMFY_BASE_PATH, "node", "install",
+                    "--mode", "remote", node['url']
+                ]
+                
+                result = subprocess.run(
+                    install_cmd,
+                    stderr=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    text=True
+                )
+                
+                if result.returncode == 0:
+                    nodes_installed = True
+                    installed_nodes.append(node)
+                else:
+                    app_logger.log(LoggingType.ERROR, f"Failed to install custom node {node['title']}: {result.stderr}")
+                    
+            except subprocess.CalledProcessError as e:
+                print("returncode: ", e.returncode)
+                print("stdout: ", e.stdout)
+                print("stderr: ", e.stderr)
+                print("exception: ", e)
+                app_logger.log(LoggingType.ERROR, f"Failed to install custom node {node['title']}: {e.stderr}")
+            except Exception as e:
+                print("returncode: ", e.returncode)
+                print("stdout: ", e.stdout)
+                print("stderr: ", e.stderr)
+                print("exception: ", e)
+                app_logger.log(LoggingType.ERROR, f"Unexpected error installing node {node['title']}: {str(e)}")
+
+        return {
+            "data": {
+                "nodes_installed": nodes_installed,
+                "installed_nodes": installed_nodes  # Returning info about which nodes were installed
+            },
             "message": "",
             "status": True,
         }
@@ -667,6 +720,12 @@ class ComfyRunner:
             if not res_custom_nodes["status"]:
                 app_logger.log(LoggingType.ERROR, res_custom_nodes["message"])
                 return
+            
+            res_manual_nodes = self.download_manual_custom_nodes(extra_node_urls, client_id)
+            app_logger.log(LoggingType.DEBUG, f"Installed custom nodes: {res_manual_nodes['data']['installed_nodes']}")
+
+            
+            
 
             # download models if not already present
             res_models = self.download_models(
@@ -700,6 +759,7 @@ class ComfyRunner:
             if (
                 res_custom_nodes["data"]["nodes_installed"]
                 or res_models["data"]["models_downloaded"]
+                or res_manual_nodes["data"]["nodes_installed"]
                 or checkpoint_node_added
             ):
                 if strict_dep_list and len(strict_dep_list):
@@ -817,6 +877,9 @@ class ComfyRunner:
             host = SERVER_ADDR + ":" + str(APP_PORT)
             host = host.replace("http://", "").replace("https://", "")
             ws.connect("ws://{}/ws?clientId={}".format(host, client_id))
+            # Checking present nodes
+            registered = self.comfy_api.get_registered_nodes()
+            # print("Registered nodes:", registered)
             node_output = self.get_output(ws, workflow, client_id, output_node_ids)
             output_list = []
             for file in node_output["file_list"]:
